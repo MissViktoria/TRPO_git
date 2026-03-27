@@ -9,11 +9,10 @@
 #include <sys/time.h>
 #endif
 
-// НАСТРОЙКИ 
-#define N_SIZE      1750
-#define RUNS        10 
+#define N_SIZE      1000        // Размер матрицы (N x N) 1750 
+#define RUNS        10          // Количество запусков для каждого потока 
+#define MAX_THREADS 16          // Максимальное количество потоков для теста 
 
-// ПРОТОТИПЫ 
 void my_ssymm(int order, int side, int uplo,
               int M, int N,
               float alpha, const float *A, int lda,
@@ -26,7 +25,6 @@ void my_dsymm(int order, int side, int uplo,
               const double *B, int ldb, double beta,
               double *C, int ldc);
 
-// Определения констант
 #define CblasRowMajor 101
 #define CblasColMajor 102
 #define CblasLeft     141
@@ -50,7 +48,6 @@ double get_time(void) {
 
 // ИНИЦИАЛИЗАЦИЯ МАТРИЦ 
 
-// Заполнение случайными числами (float) 
 void init_mat_float(float *mat, int n, int lda) {
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
@@ -59,10 +56,8 @@ void init_mat_float(float *mat, int n, int lda) {
     }
 }
 
-// Создание симметричной матрицы (float) 
 void init_sym_float(float *mat, int n, int lda) {
     init_mat_float(mat, n, lda);
-    
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
             mat[j * lda + i] = mat[i * lda + j];
@@ -70,7 +65,6 @@ void init_sym_float(float *mat, int n, int lda) {
     }
 }
 
-// Заполнение случайными числами (double) 
 void init_mat_double(double *mat, int n, int lda) {
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
@@ -79,7 +73,6 @@ void init_mat_double(double *mat, int n, int lda) {
     }
 }
 
-// Создание симметричной матрицы (double) 
 void init_sym_double(double *mat, int n, int lda) {
     init_mat_double(mat, n, lda);
     for (int i = 0; i < n; i++) {
@@ -110,7 +103,7 @@ int check_float(float *C1, float *C2, int n, int ldc) {
     
     if (errors > 0) {
         printf("  Найдено %d несовпадений (max_diff = %.2e)\n", errors, max_diff);
-        printf("  Различия в пределах допустимого (продолжаем)\n");
+        printf("  Различия в пределах допустимого\n");
         return 1;
     }
     
@@ -138,7 +131,7 @@ int check_double(double *C1, double *C2, int n, int ldc) {
     
     if (errors > 0) {
         printf("  Найдено %d несовпадений (max_diff = %.2e)\n", errors, max_diff);
-        printf("  Различия в пределах допустимого (продолжаем)\n");
+        printf("  Различия в пределах допустимого\n");
         return 1;
     }
     
@@ -147,7 +140,7 @@ int check_double(double *C1, double *C2, int n, int ldc) {
 }
 
 // ТЕСТИРОВАНИЕ FLOAT 
-void test_float(int n, int runs) {
+void test_float(int n, int runs, int max_threads) {
     printf("\n");
     printf("FLOAT: матрица %d x %d\n", n, n);
     printf("Количество запусков: %d\n", runs);
@@ -195,39 +188,51 @@ void test_float(int n, int runs) {
     
     check_float(C, C_check, n, ldc);
     
-    printf("\nЗапуск измерения времени (%d запусков)...\n", runs);
+    // Массивы потоков для тестирования 
+    int threads[] = {1, 2, 4, 8, 16};
+    int num_thread_configs = 0;
+    for (int i = 0; i < 5; i++) {
+        if (threads[i] <= max_threads) {
+            num_thread_configs++;
+        }
+    }
+    
+    printf("\nЗапуск измерения времени для разных потоков...\n");
     printf("\n");
-    printf("  Запуск      Время (секунд)\n");
     
-    double total_time = 0.0;
-    double times[RUNS];
-    
-    for (int run = 0; run < runs; run++) {
-        for (int i = 0; i < n; i++) {
-            for (int j = 0; j < n; j++) {
-                C[i * ldc + j] = 0.0f;
+    // Для каждого количества потоков 
+    for (int ti = 0; ti < 5; ti++) {
+        int t = threads[ti];
+        if (t > max_threads) continue;
+        printf("Потоков: %d\n", t);
+        
+        double total_time = 0.0;
+        double times[RUNS];
+        
+        for (int run = 0; run < runs; run++) {
+            // Обнуляем C 
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < n; j++) {
+                    C[i * ldc + j] = 0.0f;
+                }
             }
+            
+            double start = get_time();
+            my_ssymm(CblasRowMajor, CblasLeft, CblasUpper, n, n,
+                     alpha, A, lda, B, ldb, beta, C, ldc);
+            double end = get_time();
+            
+            double elapsed = end - start;
+            times[run] = elapsed;
+            total_time += elapsed;
+            
+            printf("  Запуск %2d: %8.3f сек\n", run + 1, elapsed);
         }
         
-        double start = get_time();
-        my_ssymm(CblasRowMajor, CblasLeft, CblasUpper, n, n,
-                 alpha, A, lda, B, ldb, beta, C, ldc);
-        double end = get_time();
-        
-        double elapsed = end - start;
-        times[run] = elapsed;
-        total_time += elapsed;
-        
-        printf("    %2d        %8.3f\n", run + 1, elapsed);
+        double avg_time = total_time / runs;
+        printf("  Среднее: %8.3f сек\n", avg_time);
+        printf("\n");
     }
-    
-    printf("  Среднее     %8.3f\n", total_time / runs);
-    
-    printf("\nРезультаты измерений:\n");
-    for (int i = 0; i < runs; i++) {
-        printf("  Запуск %2d: %.3f сек\n", i + 1, times[i]);
-    }
-    printf("  Среднее: %.3f сек\n", total_time / runs);
     
     free(A);
     free(B);
@@ -236,7 +241,7 @@ void test_float(int n, int runs) {
 }
 
 // ТЕСТИРОВАНИЕ DOUBLE 
-void test_double(int n, int runs) {
+void test_double(int n, int runs, int max_threads) {
     printf("\n");
     printf("DOUBLE: матрица %d x %d\n", n, n);
     printf("Количество запусков: %d\n", runs);
@@ -284,39 +289,46 @@ void test_double(int n, int runs) {
     
     check_double(C, C_check, n, ldc);
     
-    printf("\nЗапуск измерения времени (%d запусков)...\n", runs);
+    // Массивы потоков для тестирования 
+    int threads[] = {1, 2, 4, 8, 16};
+    
+    printf("\nЗапуск измерения времени для разных потоков...\n");
     printf("\n");
-    printf("  Запуск      Время (секунд)\n");
     
-    double total_time = 0.0;
-    double times[RUNS];
-    
-    for (int run = 0; run < runs; run++) {
-        for (int i = 0; i < n; i++) {
-            for (int j = 0; j < n; j++) {
-                C[i * ldc + j] = 0.0;
+    // Для каждого количества потоков 
+    for (int ti = 0; ti < 5; ti++) {
+        int t = threads[ti];
+        if (t > max_threads) continue;
+        
+        printf("Потоков: %d\n", t);
+        
+        double total_time = 0.0;
+        double times[RUNS];
+        
+        for (int run = 0; run < runs; run++) {
+            // Обнуляем C 
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < n; j++) {
+                    C[i * ldc + j] = 0.0;
+                }
             }
+            
+            double start = get_time();
+            my_dsymm(CblasRowMajor, CblasLeft, CblasUpper, n, n,
+                     alpha, A, lda, B, ldb, beta, C, ldc);
+            double end = get_time();
+            
+            double elapsed = end - start;
+            times[run] = elapsed;
+            total_time += elapsed;
+            
+            printf("  Запуск %2d: %8.3f сек\n", run + 1, elapsed);
         }
         
-        double start = get_time();
-        my_dsymm(CblasRowMajor, CblasLeft, CblasUpper, n, n,
-                 alpha, A, lda, B, ldb, beta, C, ldc);
-        double end = get_time();
-        
-        double elapsed = end - start;
-        times[run] = elapsed;
-        total_time += elapsed;
-        
-        printf("    %2d        %8.3f\n", run + 1, elapsed);
+        double avg_time = total_time / runs;
+        printf("  Среднее: %8.3f сек\n", avg_time);
+        printf("\n");
     }
-    
-    printf("  Среднее     %8.3f\n", total_time / runs);
-    
-    printf("\nРезультаты измерений:\n");
-    for (int i = 0; i < runs; i++) {
-        printf("  Запуск %2d: %.3f сек\n", i + 1, times[i]);
-    }
-    printf("  Среднее: %.3f сек\n", total_time / runs);
     
     free(A);
     free(B);
@@ -327,15 +339,17 @@ void test_double(int n, int runs) {
 // MAIN 
 int main() {
     printf("\n");
-    printf("Тестирование\n");
+    printf("Тестирование производительности SYMM\n");
     printf("Размер матрицы: %d x %d\n", N_SIZE, N_SIZE);
     printf("Количество запусков: %d\n", RUNS);
+    printf("Максимум потоков: %d\n", MAX_THREADS);
     
     printf("\n");
     printf("Начинаем тестирование...\n");
+    printf("(это может занять много времени)\n");
     
-    test_float(N_SIZE, RUNS);
-    test_double(N_SIZE, RUNS);
+    test_float(N_SIZE, RUNS, MAX_THREADS);
+    test_double(N_SIZE, RUNS, MAX_THREADS);
     
     printf("\n");
     printf("Тестирование завершено\n");
