@@ -9,9 +9,11 @@
 #include <sys/time.h>
 #endif
 
-#define N_SIZE      1000        // Размер матрицы (N x N) 1750 
-#define RUNS        10          // Количество запусков для каждого потока 
-#define MAX_THREADS 16          // Максимальное количество потоков для теста 
+#include <cblas.h>
+
+#define N_SIZE      1750        // Размер матрицы
+#define RUNS        10          // Количество запусков 
+#define MAX_THREADS 16          // Максимальное количество потоков 
 
 void my_ssymm(int order, int side, int uplo,
               int M, int N,
@@ -32,7 +34,7 @@ void my_dsymm(int order, int side, int uplo,
 #define CblasUpper    121
 #define CblasLower    122
 
-// ТАЙМЕР 
+// Таймер  
 double get_time(void) {
 #ifdef _WIN32
     LARGE_INTEGER freq, count;
@@ -46,8 +48,16 @@ double get_time(void) {
 #endif
 }
 
-// ИНИЦИАЛИЗАЦИЯ МАТРИЦ 
+// Среднее геометрическое 
+double geometric_mean(double *values, int n) {
+    double product = 1.0;
+    for (int i = 0; i < n; i++) {
+        product *= values[i];
+    }
+    return pow(product, 1.0 / n);
+}
 
+// инициализация матрицы  
 void init_mat_float(float *mat, int n, int lda) {
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
@@ -82,7 +92,7 @@ void init_sym_double(double *mat, int n, int lda) {
     }
 }
 
-// ПРОВЕРКА КОРРЕКТНОСТИ 
+// проверка корректности 
 int check_float(float *C1, float *C2, int n, int ldc) {
     float max_diff = 0.0f;
     int errors = 0;
@@ -139,7 +149,7 @@ int check_double(double *C1, double *C2, int n, int ldc) {
     return 1;
 }
 
-// ТЕСТИРОВАНИЕ FLOAT 
+// Тест FLOAT  
 void test_float(int n, int runs, int max_threads) {
     printf("\n");
     printf("FLOAT: матрица %d x %d\n", n, n);
@@ -149,10 +159,11 @@ void test_float(int n, int runs, int max_threads) {
     
     float *A = (float*)malloc(n * n * sizeof(float));
     float *B = (float*)malloc(n * n * sizeof(float));
-    float *C = (float*)malloc(n * n * sizeof(float));
+    float *C_my = (float*)malloc(n * n * sizeof(float));
+    float *C_oblas = (float*)malloc(n * n * sizeof(float));
     float *C_check = (float*)malloc(n * n * sizeof(float));
     
-    if (!A || !B || !C || !C_check) {
+    if (!A || !B || !C_my || !C_oblas || !C_check) {
         printf("Ошибка выделения памяти!\n");
         exit(1);
     }
@@ -164,17 +175,22 @@ void test_float(int n, int runs, int max_threads) {
     float alpha = 1.0f;
     float beta = 0.0f;
     
+    // Проверка корректности 
     printf("\nПроверка корректности...\n");
     
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
-            C[i * ldc + j] = 0.0f;
+            C_my[i * ldc + j] = 0.0f;
+            C_oblas[i * ldc + j] = 0.0f;
             C_check[i * ldc + j] = 0.0f;
         }
     }
     
     my_ssymm(CblasRowMajor, CblasLeft, CblasUpper, n, n,
-             alpha, A, lda, B, ldb, beta, C, ldc);
+             alpha, A, lda, B, ldb, beta, C_my, ldc);
+    
+    cblas_ssymm(CblasRowMajor, CblasLeft, CblasUpper, n, n,
+                alpha, A, lda, B, ldb, beta, C_oblas, ldc);
     
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
@@ -186,61 +202,83 @@ void test_float(int n, int runs, int max_threads) {
         }
     }
     
-    check_float(C, C_check, n, ldc);
+    printf("Сравнение my_symm с простым алгоритмом:\n");
+    check_float(C_my, C_check, n, ldc);
+    printf("Сравнение OpenBLAS с простым алгоритмом:\n");
+    check_float(C_oblas, C_check, n, ldc);
     
-    // Массивы потоков для тестирования 
+    // Массивы потоков 
     int threads[] = {1, 2, 4, 8, 16};
-    int num_thread_configs = 0;
-    for (int i = 0; i < 5; i++) {
-        if (threads[i] <= max_threads) {
-            num_thread_configs++;
-        }
-    }
     
-    printf("\nЗапуск измерения времени для разных потоков...\n");
-    printf("\n");
+    printf("\nЗапуск бенчмаркинга\n");
     
-    // Для каждого количества потоков 
     for (int ti = 0; ti < 5; ti++) {
         int t = threads[ti];
         if (t > max_threads) continue;
+        
+        openblas_set_num_threads(t);
+        
         printf("Потоков: %d\n", t);
         
-        double total_time = 0.0;
-        double times[RUNS];
+        double times_my[RUNS];
+        double times_oblas[RUNS];
+        double total_my = 0.0, total_oblas = 0.0;
         
         for (int run = 0; run < runs; run++) {
-            // Обнуляем C 
+            // Сброс C для my_ssymm 
             for (int i = 0; i < n; i++) {
                 for (int j = 0; j < n; j++) {
-                    C[i * ldc + j] = 0.0f;
+                    C_my[i * ldc + j] = 0.0f;
                 }
             }
             
             double start = get_time();
             my_ssymm(CblasRowMajor, CblasLeft, CblasUpper, n, n,
-                     alpha, A, lda, B, ldb, beta, C, ldc);
+                     alpha, A, lda, B, ldb, beta, C_my, ldc);
             double end = get_time();
+            double elapsed_my = end - start;
+            times_my[run] = elapsed_my;
+            total_my += elapsed_my;
             
-            double elapsed = end - start;
-            times[run] = elapsed;
-            total_time += elapsed;
+            // Сброс C для OpenBLAS 
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < n; j++) {
+                    C_oblas[i * ldc + j] = 0.0f;
+                }
+            }
             
-            printf("  Запуск %2d: %8.3f сек\n", run + 1, elapsed);
+            start = get_time();
+            cblas_ssymm(CblasRowMajor, CblasLeft, CblasUpper, n, n,
+                        alpha, A, lda, B, ldb, beta, C_oblas, ldc);
+            end = get_time();
+            double elapsed_oblas = end - start;
+            times_oblas[run] = elapsed_oblas;
+            total_oblas += elapsed_oblas;
+            
+            printf("  Запуск %2d: my=%8.3f сек, OpenBLAS=%8.3f сек\n", 
+                   run + 1, elapsed_my, elapsed_oblas);
         }
         
-        double avg_time = total_time / runs;
-        printf("  Среднее: %8.3f сек\n", avg_time);
+        double avg_my = total_my / runs;
+        double avg_oblas = total_oblas / runs;
+        double geom_my = geometric_mean(times_my, runs);
+        double geom_oblas = geometric_mean(times_oblas, runs);
+        double percent = (avg_oblas / avg_my) * 100.0;
+        
+        printf("  Среднее арифметическое: my=%8.3f, OpenBLAS=%8.3f\n", avg_my, avg_oblas);
+        printf("  Среднее геометрическое: my=%8.3f, OpenBLAS=%8.3f\n", geom_my, geom_oblas);
+        printf("  Относительная производительность: %.2f%%\n", percent);
         printf("\n");
     }
     
     free(A);
     free(B);
-    free(C);
+    free(C_my);
+    free(C_oblas);
     free(C_check);
 }
 
-// ТЕСТИРОВАНИЕ DOUBLE 
+// Тест DOUBLE  
 void test_double(int n, int runs, int max_threads) {
     printf("\n");
     printf("DOUBLE: матрица %d x %d\n", n, n);
@@ -250,10 +288,11 @@ void test_double(int n, int runs, int max_threads) {
     
     double *A = (double*)malloc(n * n * sizeof(double));
     double *B = (double*)malloc(n * n * sizeof(double));
-    double *C = (double*)malloc(n * n * sizeof(double));
+    double *C_my = (double*)malloc(n * n * sizeof(double));
+    double *C_oblas = (double*)malloc(n * n * sizeof(double));
     double *C_check = (double*)malloc(n * n * sizeof(double));
     
-    if (!A || !B || !C || !C_check) {
+    if (!A || !B || !C_my || !C_oblas || !C_check) {
         printf("Ошибка выделения памяти!\n");
         exit(1);
     }
@@ -265,17 +304,22 @@ void test_double(int n, int runs, int max_threads) {
     double alpha = 1.0;
     double beta = 0.0;
     
+    // Проверка корректности 
     printf("\nПроверка корректности...\n");
     
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
-            C[i * ldc + j] = 0.0;
+            C_my[i * ldc + j] = 0.0;
+            C_oblas[i * ldc + j] = 0.0;
             C_check[i * ldc + j] = 0.0;
         }
     }
     
     my_dsymm(CblasRowMajor, CblasLeft, CblasUpper, n, n,
-             alpha, A, lda, B, ldb, beta, C, ldc);
+             alpha, A, lda, B, ldb, beta, C_my, ldc);
+    
+    cblas_dsymm(CblasRowMajor, CblasLeft, CblasUpper, n, n,
+                alpha, A, lda, B, ldb, beta, C_oblas, ldc);
     
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
@@ -287,66 +331,91 @@ void test_double(int n, int runs, int max_threads) {
         }
     }
     
-    check_double(C, C_check, n, ldc);
+    printf("Сравнение my_symm с простым алгоритмом:\n");
+    check_double(C_my, C_check, n, ldc);
+    printf("Сравнение OpenBLAS с простым алгоритмом:\n");
+    check_double(C_oblas, C_check, n, ldc);
     
-    // Массивы потоков для тестирования 
+    // Массивы потоков 
     int threads[] = {1, 2, 4, 8, 16};
     
-    printf("\nЗапуск измерения времени для разных потоков...\n");
+    printf("\nЗапуск бенчмаркинга\n");
     printf("\n");
-    
-    // Для каждого количества потоков 
     for (int ti = 0; ti < 5; ti++) {
         int t = threads[ti];
         if (t > max_threads) continue;
         
+        openblas_set_num_threads(t);
+        
         printf("Потоков: %d\n", t);
         
-        double total_time = 0.0;
-        double times[RUNS];
+        double times_my[RUNS];
+        double times_oblas[RUNS];
+        double total_my = 0.0, total_oblas = 0.0;
         
         for (int run = 0; run < runs; run++) {
-            // Обнуляем C 
+            // Сброс C для my_dsymm 
             for (int i = 0; i < n; i++) {
                 for (int j = 0; j < n; j++) {
-                    C[i * ldc + j] = 0.0;
+                    C_my[i * ldc + j] = 0.0;
                 }
             }
             
             double start = get_time();
             my_dsymm(CblasRowMajor, CblasLeft, CblasUpper, n, n,
-                     alpha, A, lda, B, ldb, beta, C, ldc);
+                     alpha, A, lda, B, ldb, beta, C_my, ldc);
             double end = get_time();
+            double elapsed_my = end - start;
+            times_my[run] = elapsed_my;
+            total_my += elapsed_my;
             
-            double elapsed = end - start;
-            times[run] = elapsed;
-            total_time += elapsed;
+            // Сброс C для OpenBLAS 
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < n; j++) {
+                    C_oblas[i * ldc + j] = 0.0;
+                }
+            }
             
-            printf("  Запуск %2d: %8.3f сек\n", run + 1, elapsed);
+            start = get_time();
+            cblas_dsymm(CblasRowMajor, CblasLeft, CblasUpper, n, n,
+                        alpha, A, lda, B, ldb, beta, C_oblas, ldc);
+            end = get_time();
+            double elapsed_oblas = end - start;
+            times_oblas[run] = elapsed_oblas;
+            total_oblas += elapsed_oblas;
+            
+            printf("  Запуск %2d: my=%8.3f сек, OpenBLAS=%8.3f сек\n", 
+                   run + 1, elapsed_my, elapsed_oblas);
         }
         
-        double avg_time = total_time / runs;
-        printf("  Среднее: %8.3f сек\n", avg_time);
+        double avg_my = total_my / runs;
+        double avg_oblas = total_oblas / runs;
+        double geom_my = geometric_mean(times_my, runs);
+        double geom_oblas = geometric_mean(times_oblas, runs);
+        double percent = (avg_oblas / avg_my) * 100.0;
+        
+        printf("  Среднее арифметическое: my=%8.3f, OpenBLAS=%8.3f\n", avg_my, avg_oblas);
+        printf("  Среднее геометрическое: my=%8.3f, OpenBLAS=%8.3f\n", geom_my, geom_oblas);
+        printf("  Относительная производительность: %.2f%%\n", percent);
         printf("\n");
     }
     
     free(A);
     free(B);
-    free(C);
+    free(C_my);
+    free(C_oblas);
     free(C_check);
 }
-
-// MAIN 
+ 
 int main() {
     printf("\n");
-    printf("Тестирование производительности SYMM\n");
+    printf("Тестирование\n");
     printf("Размер матрицы: %d x %d\n", N_SIZE, N_SIZE);
     printf("Количество запусков: %d\n", RUNS);
     printf("Максимум потоков: %d\n", MAX_THREADS);
     
     printf("\n");
     printf("Начинаем тестирование...\n");
-    printf("(это может занять много времени)\n");
     
     test_float(N_SIZE, RUNS, MAX_THREADS);
     test_double(N_SIZE, RUNS, MAX_THREADS);
